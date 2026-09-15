@@ -1,0 +1,29 @@
+{
+  "name": "smoothbili",
+  "version": "0.1.0",
+  "private": true,
+  "description": "SmoothBili / Biliboli - 一个无广告、开源、非盈利的第三方哔哩哔哩 Web 客户端",
+  "scripts": {
+    "dev": "next dev -p 3000",
+    "build": "next build",
+    "start": "next start -p 3000",
+    "lint": "next lint",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "next": "15.5.4",
+    "qrcode": "^1.5.4",
+    "react": "19.1.1",
+    "react-dom": "19.1.1"
+  },
+  "devDependencies": {
+    "@tailwindcss/postcss": "^4.1.13",
+    "@types/node": "^22.15.3",
+    "@types/qrcode": "^1.5.5",
+    "@types/react": "^19.1.9",
+    "@types/react-dom": "^19.1.7",
+    "postcss": "^8.5.6",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.2"
+  }
+}
