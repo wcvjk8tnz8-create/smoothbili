@@ -78,6 +78,36 @@ SmoothBili 是一个**在浏览器里用的第三方 B 站客户端**。它不�
 
 ## 技术栈
 
+### 风控对抗：三层设备身份机制
+
+只做 WBI 签名是不够的。B 站 web 端实际有**四道**风控，缺任何一道都可能触发
+`-352 风控校验失败` / `412` / `request was banned`。本项目四道全实现：
+
+| 机制 | 作用 | 缺失后果 | 实现位置 |
+|---|---|---|---|
+| **WBI 签名** | 请求参数完整性校验 | `-352` | `src/lib/wbi.ts` |
+| **buvid 激活** | 设备指纹有效化 | 风控拦截（官方明确：web 端互动操作要求已激活的 buvid3） | `bilibase.ts` → `activateBuvid()` |
+| **bili_ticket** | JWT 设备票据，3 天有效 | 官方原话「非必需，但存在可降低风控概率」 | `bilibase.ts` → `getBiliTicket()` |
+| **dm_img 参数** | 浏览器渲染环境指纹 | `wbi/playurl` 直接返回 **412** | `bilibase.ts` → `withDmImg()` |
+
+细节：
+
+- **buvid 激活**：拿到 `buvid3` 后必须 POST 一次
+  `/x/internal/gaia-gateway/ExClimbWuzhi` 才算"激活"，否则 B 站视其为无效指纹。
+  每设备只做一次，失败不阻塞主流程。
+- **bili_ticket**：`HMAC-SHA256(key = "XgwSnGZ1p", msg = "ts" + 时间戳)` 得到 `hexsign`，
+  再 POST 到 `bapis/bilibili.api.ticket.v1.Ticket/GenWebTicket` 换取 JWT。
+  带内存缓存 + 并发去重，不会重复请求。
+- **dm_img**：`dm_img_list` / `dm_img_str` / `dm_cover_img_str` / `dm_img_inter`
+  描述的是浏览器 WebGL 渲染环境，服务端只校验存在性不验真，用公开常量即可
+  （与 yt-dlp 等开源实现一致）。**登录状态改用 `dm_img_switch=0`**，不注入这些参数。
+
+> 签名算法本身与 PiliPlus `lib/utils/wbi_sign.dart` 逐字符一致：
+> 同一张 64 位 `mixinKeyEncTab`、同样的 `[!'()*]` 过滤、
+> 同样的 `md5(queryStr + mixinKey)`。已用官方示例密钥验证通过。
+
+### 技术栈明细
+
 | 层 | 选型 | 理由 |
 |---|---|---|
 | 框架 | **Next.js 15（App Router）** | 服务端渲染 + Route Handlers 天然当代理层，一份代码搞定前后端 |
@@ -312,6 +342,8 @@ location / {
 |---|---|---|---|
 | `SESSION_SECRET` | 生产必填 | 内置不安全默认值 | 登录态 AES-GCM 加密密钥。用 `openssl rand -hex 32` 生成 |
 | `PLAYBACK_PROXY_BASE` | 否 | 空（走本站 `/api/playback`） | 外部视频流代理地址，填 Cloudflare Worker 的域名 |
+| `BILI_API_PROXY_BASE` | 否 | 空（直连 B 站） | **B 站接口中转地址**。被 B 站封 IP 时必填，见下方说明 |
+| `BILI_API_PROXY_TOKEN` | 否 | 空 | 配合上面中转服务的鉴权 token |
 
 把 `SESSION_SECRET` 写在 `.env.local`（本地）或 Vercel 的 Environment Variables（线上）。**不要提交到 Git。**
 
@@ -416,6 +448,46 @@ smoothbili/
 ---
 
 ## 常见问题 FAQ
+
+### Q：部署在 Cloudflare Workers 上，报 `request was banned` 或 `Unexpected token '<'`
+
+**这是 B 站把 Cloudflare 的出口 IP 封了**，不是代码问题。
+
+判断依据：这两个报错分别对应 B 站 WAF 的两种回包 —— HTML 拦截页（导致 JSON 解析失败）和 JSON `{"message":"request was banned"}`。Cloudflare 的 IP 段被爬虫滥用严重，B 站（阿里云 WAF）对其整段拉黑，这种封禁是 IP 层级的，**改 UA、改 Referer、重算签名都无效**。
+
+三种解法，按推荐度排序：
+
+1. **整个应用搬到香港 VPS**（最简单，Dockerfile 已备好）
+2. **保留 Cloudflare 渲染，B 站请求走 VPS 中转**（见下方 [API 中转](#api-中转方案)）
+3. 换 Vercel 试试 —— 但同样是海外 IP，也可能被封，只能赌
+
+### Q：API 中转方案怎么用
+
+适用于"想保留 Cloudflare 全球加速，但 B 站请求需要干净 IP"的场景：
+
+```
+浏览器 → Cloudflare Workers（渲染页面，快）
+            ↓ BILI_API_PROXY_BASE
+       你的香港 VPS（中转，IP 干净）
+            ↓
+         B 站接口 / CDN
+```
+
+步骤：
+
+1. 把 [`docs/api-relay.js`](./docs/api-relay.js) 传到你的香港 VPS
+2. 启动：`RELAY_TOKEN=$(openssl rand -hex 24) pm2 start api-relay.js --name bili-relay`
+3. 建议套 HTTPS（Caddy 一条命令搞定），别明文传 Cookie
+4. 在 Cloudflare Workers 项目里加两个环境变量：
+
+   | Name | Value |
+   |---|---|
+   | `BILI_API_PROXY_BASE` | `https://relay.你的域名.com` |
+   | `BILI_API_PROXY_TOKEN` | 上一步生成的 token |
+
+5. 重新部署
+
+> 中转服务内置了域名白名单（只允许 B 站系域名）+ token 鉴权，**这两项都不要关**，否则你的 VPS 会变成公开的免费代理。
 
 ### Q：首页显示「无法获取 WBI 密钥」或报错 -352
 

@@ -12,6 +12,8 @@ import {
   PASSPORT_BASE,
   biliFetch,
   getGuestIdentity,
+  resolveUrl,
+  proxyHeaders,
   UA,
   REFERER,
 } from "./bilibase";
@@ -191,13 +193,14 @@ export async function getDanmaku(
   cred: BiliCredential | null,
 ): Promise<Danmaku[]> {
   const guest = await getGuestIdentity();
-  const res = await fetch(`${API_BASE}/x/v1/dm/list.so?oid=${cid}`, {
+  const res = await fetch(resolveUrl(`${API_BASE}/x/v1/dm/list.so?oid=${cid}`), {
     headers: {
       "User-Agent": UA,
       Referer: REFERER,
       Cookie: cred
         ? `SESSDATA=${cred.SESSDATA}; DedeUserID=${cred.DedeUserID}; bili_jct=${cred.bili_jct}`
         : `buvid3=${guest.buvid3}`,
+      ...proxyHeaders(),
     },
     signal: AbortSignal.timeout(12000),
   });
@@ -449,13 +452,14 @@ export async function reportHeartbeat(
     start_ts: String(Math.floor(Date.now() / 1000)),
     csrf: cred.bili_jct,
   });
-  await fetch(`${API_BASE}/x/click-interface/web/heartbeat`, {
+  await fetch(resolveUrl(`${API_BASE}/x/click-interface/web/heartbeat`), {
     method: "POST",
     headers: {
       "Content-Type": "application/x-www-form-urlencoded",
       "User-Agent": UA,
       Referer: REFERER,
       Cookie: `SESSDATA=${cred.SESSDATA}; bili_jct=${cred.bili_jct}; DedeUserID=${cred.DedeUserID}`,
+      ...proxyHeaders(),
     },
     body,
   }).catch(() => {});

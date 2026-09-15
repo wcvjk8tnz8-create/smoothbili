@@ -67,7 +67,20 @@ export async function GET(request: NextRequest) {
 
   let upstream: Response;
   try {
-    upstream = await fetch(target.toString(), { headers, redirect: "follow" });
+    // 若配置了 API 中转（BILI_API_PROXY_BASE），视频流也一并走中转，
+    // 否则 Cloudflare / Serverless 的出口 IP 可能被 B 站 CDN 拒绝。
+    const relay = process.env.BILI_API_PROXY_BASE?.replace(/\/$/, "");
+    const relayToken = process.env.BILI_API_PROXY_TOKEN;
+    const fetchUrl = relay
+      ? `${relay}?url=${encodeURIComponent(target.toString())}`
+      : target.toString();
+    const relayHeaders: Record<string, string> = relayToken
+      ? { "x-relay-token": relayToken }
+      : {};
+    upstream = await fetch(fetchUrl, {
+      headers: { ...headers, ...relayHeaders },
+      redirect: "follow",
+    });
   } catch {
     return new Response("upstream error", { status: 502 });
   }
