@@ -11,11 +11,19 @@ import type { PlayUrlData } from "@/lib/types";
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-/** 把 B 站的直链换成 /api/playback?u=base64 代理 */
+/**
+ * 把 B 站的直链换成代理地址。
+ *
+ * 默认走本站 /api/playback。若设置了 PLAYBACK_PROXY_BASE（例如自建的
+ * Cloudflare Worker 流代理），则改用该地址 —— Vercel 等 Serverless 平台
+ * 有函数超时与带宽限制，把视频流挪到 Workers 上更稳、也更省额度。
+ */
 function proxyUrl(u?: string): string {
   if (!u) return "";
   const fixed = u.startsWith("//") ? `https:${u}` : u;
-  return `/api/playback?u=${Buffer.from(fixed).toString("base64")}`;
+  const base = process.env.PLAYBACK_PROXY_BASE?.replace(/\/$/, "");
+  const query = `u=${Buffer.from(fixed).toString("base64")}`;
+  return base ? `${base}?${query}` : `/api/playback?${query}`;
 }
 
 function rewrite(data: PlayUrlData): PlayUrlData {
