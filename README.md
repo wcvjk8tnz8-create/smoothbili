@@ -626,6 +626,43 @@ B 站图床校验 Referer，图片必须走 `/api/img` 代理。代码里所有�
 - 检查 `/api/img` 接口是不是被服务商拦了
 - 图片代理有 24 小时缓存，清一下浏览器缓存
 
+### Q：部署在 Vercel 上，视频播放不了
+
+**这是架构问题，不是 bug —— Vercel 天生不适合转发视频流。**
+
+先自查，浏览器打开：
+
+```
+https://你的域名/api/diag/play?bvid=随便一个BV号
+```
+
+它会逐级体检并把结论写在 `finalVerdict` 字段。最常见的输出：
+
+```json
+"architecture": {
+  "verdict": "❌ 运行在 Vercel 但未配 PLAYBACK_PROXY_BASE —— 视频流会走 Vercel 函数转发，必然失败"
+}
+```
+
+**为什么必然失败**（Vercel 官方限制，无法通过配置绕过）：
+
+| 限制 | 数值 | 对视频流的影响 |
+|---|---|---|
+| **函数响应体上限** | **4.5 MB** | 一个 1080P 视频动辄几百 MB，直接超限 |
+| 函数超时（Hobby） | 60 秒 | 长连接被强行切断，看到一半卡住 |
+| 带宽（Hobby） | 100 GB/月 | 看几十个视频就耗尽，之后全部加载失败 |
+| Active CPU（Hobby） | 4 小时/月 | 流式转发持续占用 CPU，很快烧完 |
+
+> Vercel 官方原话：「Vercel Functions are designed to respond quickly to clients
+> and should be treated like a lightweight API layer, **not a media server**.」
+
+**解法**：部署 `docs/cloudflare-worker.js`（带宽免费、无 4.5MB 限制），
+把拿到的地址填进 Vercel 的 `PLAYBACK_PROXY_BASE` 环境变量，Redeploy。
+页面和接口继续留在 Vercel，只有视频流走 Worker。
+
+诊断端点还会实测两条路径（外部代理 / 本站 playback），
+只取前 1KB，不浪费带宽，并告诉你 Range 是否正常（决定能否拖动进度条）。
+
 ### Q：视频播放报 403 / 一直转圈
 
 - **403**：视频流没走代理，或者代理的 Referer 没带上。确认用的是 `/api/playback`（或你配的 Worker），**不要直接把 B 站 CDN 地址塞给浏览器**

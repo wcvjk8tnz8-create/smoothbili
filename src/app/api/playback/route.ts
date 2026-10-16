@@ -86,7 +86,16 @@ export async function GET(request: NextRequest) {
   }
 
   if (!upstream.ok && upstream.status !== 206) {
-    return new Response(`upstream ${upstream.status}`, { status: upstream.status });
+    const hint =
+      upstream.status === 403
+        ? "上游 CDN 拒绝（403）：多为来源 IP 被 B 站拉黑。Vercel / Cloudflare 出口段常被封，需配 BILI_API_PROXY_BASE 走干净 IP，或把视频流交给 Cloudflare Worker。"
+        : upstream.status === 404
+          ? "上游 404：播放地址已过期（B 站地址有时效），刷新页面重试"
+          : `上游返回 ${upstream.status}`;
+    return new Response(`upstream ${upstream.status} — ${hint}`, {
+      status: upstream.status,
+      headers: { "Cache-Control": "no-store" },
+    });
   }
 
   const respHeaders = new Headers();

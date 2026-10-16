@@ -77,16 +77,26 @@ export async function GET(request: Request) {
   const cred = await getCredential();
   // mp4=1：降级方案，请求 MP4 直链（fnval=1），供 dash.js 不可用时原生播放
   const mp4 = url.searchParams.get("mp4") === "1";
+
+  // 架构告警：Vercel 等 Serverless 上用本站转发视频流必然失败
+  const onVercel = Boolean(process.env.VERCEL);
+  const warn =
+    onVercel && !process.env.PLAYBACK_PROXY_BASE
+      ? "当前运行在 Vercel 且未配置 PLAYBACK_PROXY_BASE：视频流将由本站函数转发，"
+        + "受 4.5MB 响应体上限与 60s 超时限制，基本无法播放。"
+        + "请部署 docs/cloudflare-worker.js 并把地址填入 PLAYBACK_PROXY_BASE。"
+      : undefined;
+
   try {
     const data = await getPlayUrl({ bvid, cid, qn, fnval: mp4 ? 1 : 4048 }, cred);
     return NextResponse.json(
-      { code: 0, data: rewrite(data), isLogin: Boolean(cred?.SESSDATA) },
+      { code: 0, data: rewrite(data), isLogin: Boolean(cred?.SESSDATA), warn },
       { headers: { "Cache-Control": "no-store" } },
     );
   } catch (e) {
     const message = e instanceof Error ? e.message : "获取播放地址失败";
     return NextResponse.json(
-      { code: -1, message },
+      { code: -1, message, warn },
       { status: 200, headers: { "Cache-Control": "no-store" } },
     );
   }
