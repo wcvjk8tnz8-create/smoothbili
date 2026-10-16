@@ -6,6 +6,50 @@
 
 export const SESSION_COOKIE = "smoothbili_session";
 
+/**
+ * 设备指纹 Cookie。
+ *
+ * 为什么必须持久化到浏览器：
+ * Cloudflare Workers / Serverless 是多实例的，内存全局变量在每个实例各有一份。
+ * 如果 buvid3 只存在内存里，生成二维码和轮询扫码会落在不同实例、拿到不同的
+ * buvid3，B 站判定设备指纹不一致 —— 表现为"登录成功但不下发 Cookie"。
+ *
+ * 放进 Cookie 后由浏览器携带，跨实例保持一致。buvid 本身不是敏感信息。
+ */
+export const GUEST_COOKIE = "smoothbili_guest";
+
+interface GuestIdentityLike {
+  buvid3: string;
+  buvid4: string;
+}
+
+export function encodeGuestId(g: GuestIdentityLike): string {
+  return b64encode(new TextEncoder().encode(JSON.stringify(g)).buffer as ArrayBuffer)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+}
+
+export function decodeGuestId(raw: string | undefined): GuestIdentityLike | null {
+  if (!raw) return null;
+  try {
+    let s = raw.replace(/-/g, "+").replace(/_/g, "/");
+    while (s.length % 4) s += "=";
+    const json = new TextDecoder().decode(b64decode(s));
+    const o = JSON.parse(json) as GuestIdentityLike;
+    if (!o?.buvid3) return null;
+    return { buvid3: o.buvid3, buvid4: o.buvid4 ?? "" };
+  } catch {
+    return null;
+  }
+}
+
+/** 生成设备指纹 Cookie（有效期 30 天） */
+export function guestCookie(g: GuestIdentityLike): string {
+  const secure = process.env.NODE_ENV === "production" ? "; Secure" : "";
+  return `${GUEST_COOKIE}=${encodeGuestId(g)}; Path=/; HttpOnly; SameSite=Lax; Max-Age=${30 * 24 * 3600}${secure}`;
+}
+
 /** 从 SESSDATA 字符串解析出的凭据 */
 export interface BiliCredential {
   DedeUserID: string;

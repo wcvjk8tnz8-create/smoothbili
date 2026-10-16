@@ -72,6 +72,21 @@ function uuidV4(): string {
 
 let guestMemory: GuestIdentity | null = null;
 
+/**
+ * 用外部已知的身份覆盖内存缓存（通常是从请求 Cookie 恢复）。
+ *
+ * Serverless / 多实例环境下内存不共享，必须靠这一步把指纹对齐，
+ * 否则同一登录流程里的两次请求会带着不同 buvid3。
+ */
+export function restoreGuestIdentity(id: { buvid3: string; buvid4: string } | null) {
+  if (id?.buvid3) guestMemory = { buvid3: id.buvid3, buvid4: id.buvid4 ?? "" };
+}
+
+/** 当前内存中的设备指纹（诊断用） */
+export function currentGuestIdentity(): GuestIdentity | null {
+  return guestMemory;
+}
+
 export async function getGuestIdentity(): Promise<GuestIdentity> {
   if (guestMemory) return guestMemory;
   try {
