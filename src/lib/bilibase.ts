@@ -403,11 +403,30 @@ export async function biliFetchRaw<T = unknown>(
   params: Params = {},
   opts: BiliFetchOptions = {},
 ): Promise<BiliResponse<T>> {
+  return (await biliFetchRawWithHeaders<T>(url, params, opts)).body;
+}
+
+/**
+ * 与 biliFetchRaw 相同，但额外返回上游响应的 Set-Cookie。
+ *
+ * 登录接口（passport-login）在新版 B 站里除了 data.url 之外，
+ * 也会通过响应头 Set-Cookie 下发 SESSDATA / bili_jct / DedeUserID。
+ * 部分部署环境（Cloudflare Workers / OpenNext）拿不到 data.url 里的参数，
+ * 必须靠响应头兜底，否则就会"登录成功但取不到 Cookie"。
+ */
+export async function biliFetchRawWithHeaders<T = unknown>(
+  url: string,
+  params: Params = {},
+  opts: BiliFetchOptions = {},
+): Promise<{ body: BiliResponse<T>; setCookies: string[] }> {
   const method = opts.method ?? "GET";
   const cred = opts.cred ?? null;
   const ttl = opts.cacheTtl ?? defaultTtl(url, method);
 
-  const doRequest = async (): Promise<BiliResponse<T>> => {
+  const doRequest = async (): Promise<{
+    body: BiliResponse<T>;
+    setCookies: string[];
+  }> => {
     const baseCookies = {
       ...(await guestCookies(cred)),
       ...(opts.extraCookies ?? {}),
@@ -456,13 +475,35 @@ export async function biliFetchRaw<T = unknown>(
     });
 
     const text = await res.text();
+
+    // 收集 Set-Cookie。getSetCookie 在 Node 18.14+ / undici 上可用，
+    // 老环境只有 getAllHeaders/headers.get()，做多层兜底。
+    let setCookies: string[] = [];
     try {
-      return JSON.parse(text) as BiliResponse<T>;
+      const h = res.headers as unknown as {
+        getSetCookie?: () => string[];
+      };
+      if (typeof h.getSetCookie === "function") {
+        setCookies = h.getSetCookie();
+      }
+    } catch {
+      /* ignore */
+    }
+    if (!setCookies.length) {
+      const single = res.headers.get("set-cookie");
+      if (single) setCookies = splitSetCookieHeader(single);
+    }
+
+    try {
+      return { body: JSON.parse(text) as BiliResponse<T>, setCookies };
     } catch {
       return {
-        code: -1,
-        message: `非 JSON 响应（HTTP ${res.status}）`,
-        data: null as T,
+        body: {
+          code: -1,
+          message: `非 JSON 响应（HTTP ${res.status}）`,
+          data: null as T,
+        },
+        setCookies,
       };
     }
   };
@@ -470,7 +511,7 @@ export async function biliFetchRaw<T = unknown>(
   if (ttl <= 0) {
     const res = await doRequest();
     // -352 / -403：风控或签名过期 → 丢弃密钥重试一次
-    if (res.code === -352 || res.code === -403) {
+    if (res.body.code === -352 || res.body.code === -403) {
       dropWbiKeys();
       return doRequest();
     }
@@ -481,16 +522,23 @@ export async function biliFetchRaw<T = unknown>(
     cred?.DedeUserID ?? "0"
   }`;
   const cached = cacheGet(cacheKey);
-  if (cached) return cached as BiliResponse<T>;
+  if (cached) return { body: cached as BiliResponse<T>, setCookies: [] };
 
   let res = await doRequest();
-  if (res.code === -352 || res.code === -403) {
+  if (res.body.code === -352 || res.body.code === -403) {
     dropWbiKeys();
     res = await doRequest();
   }
   // 只缓存成功的响应
-  if (res.code === 0) cacheSet(cacheKey, res, ttl);
+  if (res.body.code === 0) cacheSet(cacheKey, res.body, ttl);
   return res;
+}
+
+/** 把一条含多个 cookie 的 set-cookie 字符串拆开（按 , xxx= 边界切分） */
+function splitSetCookieHeader(raw: string): string[] {
+  // 标准做法是逐条读取，合并场景只在极少数运行时出现；
+  // 这里用 expires= 里的逗号做保护性拆分。
+  return raw.split(/,(?=\s*[^;=\s]+=[^;]*)/).map((s) => s.trim());
 }
 
 /** 业务主入口：code === 0 返回 data，否则抛错 */

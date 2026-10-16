@@ -11,6 +11,8 @@ import {
   API_BASE,
   PASSPORT_BASE,
   biliFetch,
+  biliFetchRaw,
+  biliFetchRawWithHeaders,
   getGuestIdentity,
   resolveUrl,
   proxyHeaders,
@@ -335,14 +337,75 @@ export type QrcodePollResult =
       expires: number;
     };
 
+/**
+ * 从 B 站登录回调 URL 里提取 Cookie 字段。
+ *
+ * 成功时 url 形如：
+ *   https://passport.bilibili.com/x/passport-login/web/crossDomain
+ *     ?DedeUserID=xxx&DedeUserID__ckMd5=xxx&Expires=xxx&SESSDATA=xxx&bili_jct=xxx
+ *
+ * 但不同版本 / 不同部署环境下它可能不是绝对 URL，甚至整个字段缺失，
+ * 所以这里做多重兜底：绝对 URL → 相对 URL → 手工按 & 切分。
+ */
 function parseCallbackCookies(url: string): Record<string, string> {
   const out: Record<string, string> = {};
+  if (!url) return out;
+
+  const queryPart = (() => {
+    const i = url.indexOf("?");
+    return i >= 0 ? url.slice(i + 1) : "";
+  })();
+
+  // 优先用标准解析（自动做 URL decode）
   try {
-    new URL(url).searchParams.forEach((v, k) => {
-      out[k] = v;
+    const u = new URL(url, "https://passport.bilibili.com");
+    u.searchParams.forEach((v, k) => {
+      if (v) out[k] = v;
     });
+    if (out.SESSDATA) return out;
   } catch {
     /* ignore */
+  }
+
+  // 兜底：手工切分
+  if (queryPart) {
+    for (const seg of queryPart.split("&")) {
+      const idx = seg.indexOf("=");
+      if (idx <= 0) continue;
+      let k = seg.slice(0, idx).trim();
+      let v = seg.slice(idx + 1).trim();
+      if (!k || !v) continue;
+      try {
+        k = decodeURIComponent(k);
+        v = decodeURIComponent(v);
+      } catch {
+        /* 非法编码就用原值 */
+      }
+      out[k] = v;
+    }
+  }
+  return out;
+}
+
+/**
+ * 从响应头的 Set-Cookie 里提取登录所需字段。
+ * 新版 B 站 / 部分部署环境下 data.url 为空，只能靠这里兜底。
+ */
+function parseSetCookies(headers: string[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const raw of headers) {
+    const pair = raw.split(";")[0] ?? "";
+    const idx = pair.indexOf("=");
+    if (idx <= 0) continue;
+    let k = pair.slice(0, idx).trim();
+    let v = pair.slice(idx + 1).trim();
+    if (!k || !v) continue;
+    try {
+      v = decodeURIComponent(v);
+    } catch {
+      /* ignore */
+    }
+    out[k] = v;
   }
   return out;
 }
@@ -351,7 +414,7 @@ export async function pollLoginQrcode(
   qrcodeKey: string,
   buvid3: string,
 ): Promise<QrcodePollResult> {
-  const res = await biliFetchRawData<{
+  const { body, setCookies } = await biliFetchRawWithHeaders<{
     url: string;
     refresh_token: string;
     code: number;
@@ -359,19 +422,35 @@ export async function pollLoginQrcode(
   }>(
     `${PASSPORT_BASE}/x/passport-login/web/qrcode/poll`,
     { qrcode_key: qrcodeKey, source: "main-fe-header" },
+    { cacheTtl: 0, referer: REFERER, extraCookies: {} },
   );
 
-  const bizCode = res.data?.code ?? res.code;
-  const message = res.data?.message ?? res.message;
+  const bizCode = body.data?.code ?? body.code;
+  const message = body.data?.message ?? body.message;
 
   if (bizCode === 86038) return { status: "expired", message: message || "二维码已失效" };
   if (bizCode === 86090) return { status: "scanned", message: message || "已扫码，请在 App 中确认" };
   if (bizCode === 86039) return { status: "pending", message: message || "等待扫码" };
-  if (bizCode !== 0) return { status: "error", message: message || "登录失败" };
+  if (bizCode !== 0) return { status: "error", message: message || `登录失败（${bizCode}）` };
 
-  const cookies = parseCallbackCookies(res.data?.url ?? "");
+  // 双重提取：B 站既在 data.url 里带参数，也可能通过 Set-Cookie 下发。
+  // 不同部署环境（Node / Cloudflare Workers）表现不一致，两边都要试。
+  const fromUrl = parseCallbackCookies(body.data?.url ?? "");
+  const fromHeader = parseSetCookies(setCookies);
+  const cookies: Record<string, string> = { ...fromHeader, ...fromUrl };
+
   if (!cookies.SESSDATA || !cookies.DedeUserID) {
-    return { status: "error", message: "登录成功但未取到 Cookie" };
+    // 带上脱敏的诊断信息，方便排查到底是哪种情况
+    const keys = [
+      ...new Set([...Object.keys(fromUrl), ...Object.keys(fromHeader)]),
+    ];
+    const hasUrl = Boolean(body.data?.url);
+    return {
+      status: "error",
+      message:
+        `登录成功但未取到 Cookie（url:${hasUrl ? "有" : "无"}, ` +
+        `set-cookie:${setCookies.length} 条, 拿到字段:${keys.join(",") || "无"}）`,
+    };
   }
 
   return {
@@ -384,19 +463,9 @@ export async function pollLoginQrcode(
       buvid3,
       isLogin: true,
     },
-    refreshToken: res.data?.refresh_token ?? "",
+    refreshToken: body.data?.refresh_token ?? "",
     expires: 25 * 24 * 60 * 60, // SESSDATA 有效期约 30 天，保守取 25 天
   };
-}
-
-/** 该接口的业务状态在 data.code 上，需要拿原始响应 */
-async function biliFetchRawData<T>(url: string, params: Record<string, string>) {
-  const { biliFetchRaw } = await import("./bilibase");
-  return biliFetchRaw<T>(url, params, {
-    cacheTtl: 0,
-    referer: REFERER,
-    extraCookies: {},
-  });
 }
 
 /* ------------------------------ 互动 ------------------------------ */
